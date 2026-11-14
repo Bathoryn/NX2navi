@@ -187,6 +187,7 @@ static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings ch
 // was over its budget.
 #define RATE_N 8
 #define RATE_SAY 16
+#define RATE_SAY_UNDER 240u   // the log's line: under 56 presents a second (a limit of 60 measures 59 now and then)
 static uint32_t tex_rate = TRL_RATE_60;
 #define PRESENTS(n) trl_presents((uint64_t)(n), tex_rate)
 
@@ -225,10 +226,11 @@ static void rate_tick(void) {   // each submission, tex_lock held
     ring[at++ % RATE_N] = trl_rate_sample(f - f0, t - t0, low);
     t0 = t, f0 = f;
     uint32_t m = trl_rate(ring, RATE_N);
-    // one line at each crossing of 60, RATE_SAY times a run: the log then shows which waits the drops went by
-    if ((m < TRL_RATE_60) != (tex_rate < TRL_RATE_60) && said < RATE_SAY) {
-        said++;
-        if (m < TRL_RATE_60)
+    // one line at each crossing of RATE_SAY_UNDER, RATE_SAY times a run: the log then shows which waits the drops went by
+    static int slow;
+    if ((m < RATE_SAY_UNDER) != slow && said < RATE_SAY) {
+        said++, slow = m < RATE_SAY_UNDER;
+        if (slow)
             rt_log("vk: the game presents %u frames a second, fewer than 60, for %d seconds: the textures' waits count "
                    "their seconds in these (2 s are %llu presents, not 120; NX2NAVI_TEX_RATE_LOW=0: 120)",
                    m * 60 >> 8, RATE_N, (unsigned long long)trl_presents(120, m));
