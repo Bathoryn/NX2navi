@@ -179,11 +179,16 @@ static uint32_t submit_epoch = 1;   // bumped per queue submit: draw bindings ch
 // were set at 60 presents a second. Without a limit the game presents 85 to 240 a second (a menu), and "120 presents"
 // was then half a second and "30 s without a sample" 7 to 20 s: under memory pressure textures went three times as
 // readily as meant, and the ones still on screen showed their dark stand-ins until they were made again.
-// tex_rate is the presents per second as a multiple of 60 in 1/256 (256 at 60 or fewer), the highest of the last RATE_N
-// seconds so that one slow second does not shorten the thresholds; PRESENTS(n) is n presents at 60 in today's presents.
+// tex_rate is the presents per second as a multiple of 60 in 1/256, the highest of the last RATE_N seconds so that one
+// slow second does not shorten the thresholds; PRESENTS(n) is n presents at 60 in today's presents.
+// NX2NAVI_TEX_RATE_LOW (default 1; 0: as before): the rate follows the presents below 60 a second too, down to 15
+// (vk_tex_release.h trl_rate_sample). It stopped at 60, so at 21 presents a second a texture stayed out of the VRAM
+// pressure's reach for 5.7 s after its release and not 2, and the released ones held 2.1 GiB of a 12 GiB card that
+// was over its budget.
 #define RATE_N 8
-static uint32_t tex_rate = 256;
-#define PRESENTS(n) ((uint64_t)(n) * tex_rate >> 8)
+#define RATE_SAY 16
+static uint32_t tex_rate = TRL_RATE_60;
+#define PRESENTS(n) trl_presents((uint64_t)(n), tex_rate)
 
 // The wall clock of the presents (vk_tex_release.h TrlClock): rate_tick notes the present count about once a second,
 // so that the released textures' hold (drop_aged) and the take-back ages (vk_texture_reuse_log) count seconds, not
@@ -215,12 +220,20 @@ static void rate_tick(void) {   // each submission, tex_lock held
     if (!t0) t0 = t, f0 = f, pclock_t0 = t, trl_clock_tick(&pclock, f, 0);
     if (t - t0 < 1000000000ull) return;
     trl_clock_tick(&pclock, f, (uint32_t)(play_ns / 1000000000ull));
-    uint64_t r = (f - f0) * 256ull * 1000000000ull / ((t - t0) * 60);
-    ring[at++ % RATE_N] = r < 256 ? 256 : r > 2048 ? 2048 : (uint32_t)r;
+    static int low = -1, said;
+    if (low < 0) low = rt_knob("TEX_RATE_LOW", "1") != 0;
+    ring[at++ % RATE_N] = trl_rate_sample(f - f0, t - t0, low);
     t0 = t, f0 = f;
-    uint32_t m = 256;
-    for (int i = 0; i < RATE_N; i++)
-        if (ring[i] > m) m = ring[i];
+    uint32_t m = trl_rate(ring, RATE_N);
+    // one line at each crossing of 60, RATE_SAY times a run: the log then shows which waits the drops went by
+    if ((m < TRL_RATE_60) != (tex_rate < TRL_RATE_60) && said < RATE_SAY) {
+        said++;
+        if (m < TRL_RATE_60)
+            rt_log("vk: the game presents %u frames a second, fewer than 60, for %d seconds: the textures' waits count "
+                   "their seconds in these (2 s are %llu presents, not 120; NX2NAVI_TEX_RATE_LOW=0: 120)",
+                   m * 60 >> 8, RATE_N, (unsigned long long)trl_presents(120, m));
+        else rt_log("vk: the game presents 60 frames a second or more again: the textures' waits count 60 or more");
+    }
     tex_rate = m;
 }
 // Mirrored textures the GPU wrote into, sorted by address (vk_texture_cpu_stale, vk_texture_write_back). Changed under
@@ -3425,6 +3438,12 @@ static void rel_census(uint64_t cap, int room) {   // tex_lock held
     enum { YOUNG, SLOT, SLOT_OVER, SAMPLED, LOOKED, NEXT, KINDS };
     uint64_t by[KINDS] = {0}, gpu = 0;
     int n[KINDS] = {0}, ngpu = 0;
+    // the young ones by what they wait for: fewer than STALE_FRAMES since the release; content only the GPU made
+    // (GPU_STALE_FRAMES or the gap); intact and waiting out the gap (stale_after) with nothing reaching them, which
+    // the VRAM pressure takes; intact, waiting it out and still reached
+    enum { Y_NEW, Y_GPU, Y_GAP, Y_REACHED, YKINDS };
+    uint64_t yby[YKINDS] = {0}, gap_max = 0;
+    int yn[YKINDS] = {0};
     for (const Tex *e = rel_head; e; e = e->rel_next) {
         if (!e->bytes) continue;
         int shown = e->ph && pref[e->ph - 1].refs;
@@ -3434,6 +3453,12 @@ static void rel_census(uint64_t cap, int room) {   // tex_lock held
               : !e->overwritten && !idle(e, now) ? LOOKED : NEXT;
         by[k] += e->bytes, n[k]++;
         if (!comes_back_intact(e)) gpu += e->bytes, ngpu++;
+        if (k == YOUNG) {
+            int y = now - e->rel_frame < STALE_FRAMES ? Y_NEW
+                  : !comes_back_intact(e) && !e->overwritten ? Y_GPU : idle(e, now) ? Y_GAP : Y_REACHED;
+            yby[y] += e->bytes, yn[y]++;
+            if (y >= Y_GAP && stale_after(e) > gap_max) gap_max = stale_after(e);
+        }
     }
     const double M = 1048576.0;
     rt_log("vk: released textures over their bound%s: %d entries, %.0f MiB of %.0f MiB (%d of them, %.0f MiB, hold content "
@@ -3443,6 +3468,15 @@ static void rel_census(uint64_t cap, int room) {   // tex_lock held
            room ? " (kept past it while the card has room)" : "", nreleased, rel_bytes / M, cap / M,
            ngpu, gpu / M, n[YOUNG], by[YOUNG] / M, n[SAMPLED], by[SAMPLED] / M, n[SLOT], by[SLOT] / M, n[SLOT_OVER],
            by[SLOT_OVER] / M, n[LOOKED], by[LOOKED] / M, n[NEXT], by[NEXT] / M);
+    if (n[YOUNG])
+        rt_log("vk: the ones released too lately wait: %d, %.0f MiB, the first %llu presents after a release (2 s at the "
+               "%u presents a second the waits count); %d, %.0f MiB, with content only the GPU made, %llu presents or their own "
+               "gap; %d, %.0f MiB, intact, for 8 times their longest gap before a take-back (%llu presents at most) with "
+               "nothing reaching them: the VRAM pressure takes these; %d, %.0f MiB, intact, for their gap and still "
+               "reached",
+               yn[Y_NEW], yby[Y_NEW] / M, (unsigned long long)STALE_FRAMES, tex_rate * 60 >> 8, yn[Y_GPU], yby[Y_GPU] / M,
+               (unsigned long long)GPU_STALE_FRAMES, yn[Y_GAP], yby[Y_GAP] / M, (unsigned long long)gap_max, yn[Y_REACHED],
+               yby[Y_REACHED] / M);
 }
 
 static void sweep_pressure(void) {   // tex_lock held

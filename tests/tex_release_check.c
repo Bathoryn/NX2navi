@@ -60,6 +60,55 @@ static void clock_checks(void) {
           "short run: %u %u %u", trl_clock_age(&c2, 50, 10), trl_clock_age(&c2, 0, 10), trl_clock_age(&c2, 251, 10));
 }
 
+// ---- the rate the short waits go by (trl_rate_sample, trl_rate, trl_presents)
+static void rate_checks(void) {
+    const uint64_t S = 1000000000ull;
+    CHECK(trl_rate_sample(60, S, 1) == 256 && trl_rate_sample(60, S, 0) == 256, "60 presents a second");
+    CHECK(trl_rate_sample(240, S, 1) == 1024 && trl_rate_sample(240, S, 0) == 1024, "240 a second");
+    CHECK(trl_rate_sample(1000, S, 1) == TRL_RATE_MAX, "1000 a second counts as 480");
+    CHECK(trl_rate_sample(30, S, 1) == 128, "30 a second: %u", trl_rate_sample(30, S, 1));
+    CHECK(trl_rate_sample(21, S, 1) == 89, "21 a second: %u", trl_rate_sample(21, S, 1));
+    CHECK(trl_rate_sample(5, S, 1) == TRL_RATE_MIN && trl_rate_sample(0, S, 1) == TRL_RATE_MIN, "under 15 a second: 15");
+    CHECK(trl_rate_sample(30, S, 0) == 256 && trl_rate_sample(0, S, 0) == 256, "the rule before: never under 60");
+    CHECK(trl_rate_sample(100, 0, 1) == 256, "no time passed: 60");
+    CHECK(trl_rate_sample(63, 3 * S, 1) == 89, "21 a second over three seconds: %u", trl_rate_sample(63, 3 * S, 1));
+    // the highest of the samples; one not taken yet counts as 60, so a run's first seconds never go below it
+    enum { N = 8 };
+    uint32_t ring[N] = {0};
+    CHECK(trl_rate(ring, N) == 256, "no sample yet: %u", trl_rate(ring, N));
+    for (int i = 0; i < N - 1; i++) ring[i] = trl_rate_sample(21, S, 1);
+    CHECK(trl_rate(ring, N) == 256, "seven slow seconds and one not sampled: %u", trl_rate(ring, N));
+    ring[N - 1] = trl_rate_sample(21, S, 1);
+    CHECK(trl_rate(ring, N) == 89, "eight slow seconds: %u", trl_rate(ring, N));
+    ring[3] = trl_rate_sample(60, S, 1);
+    CHECK(trl_rate(ring, N) == 256, "one second at 60 among them: %u", trl_rate(ring, N));
+    ring[3] = trl_rate_sample(144, S, 1);
+    CHECK(trl_rate(ring, N) == trl_rate_sample(144, S, 1), "one second at 144 among them");
+    for (int i = 0; i < N; i++) ring[i] = trl_rate_sample(120, S, 1);
+    ring[5] = trl_rate_sample(2, S, 1);   // an area load: one second with two presents
+    CHECK(trl_rate(ring, N) == 512, "a slow second among fast ones shortens nothing: %u", trl_rate(ring, N));
+    // 120 presents at 60 a second are 2 s at every rate from 15 a second up: STALE_FRAMES, the wait after a release
+    static const uint32_t fps[] = {15, 21, 30, 45, 60, 90, 144, 240};
+    printf("the wait after a release (120 presents at 60 a second), by the presents a second:\n");
+    printf("  presents/s   before: presents, seconds   now: presents, seconds\n");
+    for (unsigned i = 0; i < sizeof fps / sizeof *fps; i++) {
+        uint64_t was = trl_presents(120, trl_rate_sample(fps[i], S, 0)), now = trl_presents(120, trl_rate_sample(fps[i], S, 1));
+        double was_s = (double)was / fps[i], now_s = (double)now / fps[i];
+        printf("  %10u   %16llu  %7.2f   %13llu  %7.2f\n", fps[i], (unsigned long long)was, was_s,
+               (unsigned long long)now, now_s);
+        CHECK(now_s > 1.9 && now_s <= 2.0, "%u presents a second: %.2f s", fps[i], now_s);
+        if (fps[i] >= 60) CHECK(was == now, "%u presents a second: %llu presents, %llu before", fps[i],
+                                (unsigned long long)now, (unsigned long long)was);
+    }
+    // under 15 a second the wait is 15 a second's: 30 presents, longer than 2 s
+    CHECK(trl_presents(120, trl_rate_sample(10, S, 1)) == 30, "10 presents a second: 30 presents");
+    // the tester's log (vk_tex_release.h): 21 presents a second. Before, 120 presents were 5.7 s there
+    double before = (double)trl_presents(120, trl_rate_sample(21, S, 0)) / 21;
+    CHECK(before > 5.7 && before < 5.72, "the rule before at 21 a second: %.2f s", before);
+    // the longer waits scale the same way: GPU_STALE_FRAMES (1800 presents at 60, 30 s)
+    CHECK(trl_presents(1800, trl_rate_sample(30, S, 1)) == 900, "30 s at 30 presents a second: 900 presents");
+}
+
 // ---- the rules
 static void rule_checks(void) {
     CHECK(trl_hold(TRL_HOLD_S, TRL_STORAGE) == 60 && trl_hold(TRL_HOLD_S, TRL_GPU) == 120, "holds 60 and 120 s");
@@ -335,6 +384,7 @@ static void hard_checks(void) {
 
 int main(void) {
     clock_checks();
+    rate_checks();
     rule_checks();
     taken_back_checks();
     session_checks();

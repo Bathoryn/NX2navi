@@ -139,3 +139,36 @@ static inline uint32_t trl_clock_age(const TrlClock *c, uint64_t frame, uint32_t
     uint32_t s = c->sec[lo % TRL_CLOCK_N];
     return now_sec > s ? now_sec - s : 0;
 }
+
+// The rate the short waits go by. vk_texture.c counts them in presents (PRESENTS(n): n presents at 60 a second: how
+// long after its release a texture may go, how long without a sample makes one idle) and scales them by the presents
+// a second, kept as a multiple of 60 in 1/256. Above 60 they always were scaled. Below 60 they were not: the rate
+// stopped at 60, so "120 presents" was 4 s at 30 presents a second and 5.7 s at 21, and every texture the game let go
+// of stayed out of the VRAM pressure's reach that much longer. The game lets go by the second, as the player moves, so
+// what the window holds grows with its length: in a tester's log (RTX 4070 SUPER at 2560x1440, 2026-11-14) it held
+// 442 MiB at 60 presents a second and 2,105 MiB at 21, on a card then 600 MiB over its budget. The rate follows the
+// presents down to TRL_RATE_MIN now (low 1; 0: stops at 60, as before).
+#define TRL_RATE_60 256u
+#define TRL_RATE_MIN 64u     // 15 presents a second: fewer count as 15
+#define TRL_RATE_MAX 2048u   // 480 presents a second
+static inline uint32_t trl_rate_sample(uint64_t presents, uint64_t ns, int low) {
+    if (!ns) return TRL_RATE_60;
+    uint64_t r = presents * 256ull * 1000000000ull / (ns * 60);
+    uint32_t least = low ? TRL_RATE_MIN : TRL_RATE_60;
+    return r < least ? least : r > TRL_RATE_MAX ? TRL_RATE_MAX : (uint32_t)r;
+}
+
+// The rate of the last n samples (one a second): the highest of them, so that a slow second or a few (an area load, a
+// movie's start) shorten nothing, and only n slow seconds in a row do. A sample not taken yet (0) counts as 60 a
+// second: the first n seconds of a run never go below it.
+static inline uint32_t trl_rate(const uint32_t *ring, int n) {
+    uint32_t m = TRL_RATE_MIN;
+    for (int i = 0; i < n; i++) {
+        uint32_t v = ring[i] ? ring[i] : TRL_RATE_60;
+        if (v > m) m = v;
+    }
+    return m;
+}
+
+// n presents at 60 a second, in presents at the rate: the same wall time.
+static inline uint64_t trl_presents(uint64_t n, uint32_t rate) { return n * rate >> 8; }

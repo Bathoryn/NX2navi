@@ -432,6 +432,13 @@
 # game does this all the time: 52,000 second uploads in three minutes without it, 600 with it. 0: only the small ones,
 # as before (for a comparison; nothing should look different). Read at start.
 # tex_same_big = 1
+# The texture cache counts its short waits in frames: a texture the game let go of may be dropped under video memory
+# pressure 2 seconds later, one nothing sampled for 2 seconds counts as idle, and so on. Above 60 fps those frame
+# counts always grew with the frame rate, so that the seconds stayed. Below 60 fps they did not shrink: the 2 seconds
+# were 4 at 30 fps and nearly 6 at 21, and the textures waiting them out held about three times the video memory on a
+# card that was already over its budget, which kept the frame rate down. 1 (the default) counts the seconds below 60
+# fps too, down to 15 fps, once the game has been under 60 fps for 8 seconds; 0: as before. Read at start.
+# tex_rate_low = 1
 # Texture compaction (experimental). Video memory is taken in blocks (vma_block_mb), and a block goes back to the
 # driver only once everything in it is freed: after a long session the blocks hold textures scattered between holes,
 # and the game holds a gigabyte or two of video memory it does not use. 1: textures no shader sampled for ten seconds
