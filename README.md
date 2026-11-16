@@ -10,7 +10,7 @@
 > window that starts Triforce Setup; **Play NX2navi** there still starts the game you have built, and your game, saves
 > and settings stay where they are. Triforce's Convert saves page brings your NX2navi saves over.
 
-**Join the official NX2navi update discord server: https://discord.com/invite/uf6gSrsPpq** 
+**Join the official Triforce update discord server: https://discord.com/invite/uf6gSrsPpq** 
 
 **NX2navi** is a static recompilation of *The Legend of Zelda: Ocarina of Time* for Nintendo Switch 2 (game
 version 1.1.1) into a native x86-64 application for Windows, with a Vulkan renderer
