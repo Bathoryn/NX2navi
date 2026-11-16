@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/images/navi.png" alt="NX2navi" width="160"></p>
+<p align="center"><a href="https://triforceproject.com"><img src="https://git.triforceproject.com/triforce/source/raw/branch/main/assets/triforce.png" alt="Triforce" width="200"></a></p>
 
 # NX2navi
 
